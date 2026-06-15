@@ -1,0 +1,60 @@
+{
+  "Comment": "Receipt & Invoice Processor Workflow - ap-south-1",
+  "StartAt": "TextractAnalyzer",
+  "States": {
+    "TextractAnalyzer": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:Region:AccountID:function:TextractAnalyzer",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.textract_result",
+      "Next": "ReviewAndCategorize"
+    },
+    "ReviewAndCategorize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:Region:AccountID:function:ReviewAndCategorize",
+        "Payload.$": "$.textract_result.Payload"
+      },
+      "ResultPath": "$.parse_result",
+      "Next": "SaveToDatabase"
+    },
+    "SaveToDatabase": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:Region:AccountID:function:SaveToDatabase",
+        "Payload.$": "$.parse_result.Payload"
+      },
+      "ResultPath": "$.save_result",
+      "Next": "ShouldSendReport"
+    },
+    "ShouldSendReport": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.parse_result.Payload.should_send_report",
+          "BooleanEquals": true,
+          "Next": "GenerateMonthlyReport"
+        }
+      ],
+      "Default": "Success"
+    },
+    "GenerateMonthlyReport": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:Region:AccountID:function:GenerateMonthlyReport",
+        "Payload.$": "$.parse_result.Payload"
+      },
+      "ResultPath": "$.report_result",
+      "End": true
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}

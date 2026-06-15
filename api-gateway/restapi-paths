@@ -1,0 +1,50 @@
+{
+    "items": [
+        {
+            "id": "<RESOURCE_ID>",
+            "path": "/"
+        },
+        {
+            "id": "<RESOURCE_ID>",
+            "parentId": "<PARENT_RESOURCE_ID>",
+            "pathPart": "expenses",
+            "path": "/expenses",
+            "resourceMethods": {
+                "GET": {},
+                "OPTIONS": {},
+                "PUT": {}
+            }
+        },
+        {
+            "id": "<RESOURCE_ID>",
+            "parentId": "<PARENT_RESOURCE_ID>",
+            "pathPart": "{expense_id}",
+            "path": "/expenses/{expense_id}",
+            "resourceMethods": {
+                "DELETE": {},
+                "OPTIONS": {},
+                "PUT": {}
+            }
+        },
+        {
+            "id": "<RESOURCE_ID>",
+            "parentId": "<PARENT_RESOURCE_ID>",
+            "pathPart": "image",
+            "path": "/expenses/{expense_id}/image",
+            "resourceMethods": {
+                "GET": {},
+                "OPTIONS": {}
+            }
+        },
+        {
+            "id": "<RESOURCE_ID>",
+            "parentId": "<PARENT_RESOURCE_ID>",
+            "pathPart": "upload-url",
+            "path": "/upload-url",
+            "resourceMethods": {
+                "OPTIONS": {},
+                "POST": {}
+            }
+        }
+    ]
+}

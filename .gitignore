@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.aws-sam/
+samconfig.toml       # has your stack name/region, keep local
+*.env
+node_modules/
+.DS_Store
