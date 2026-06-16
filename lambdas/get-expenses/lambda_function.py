@@ -4,7 +4,7 @@ from decimal import Decimal
 from boto3.dynamodb.conditions import Key
 
 dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('expenses')
+table = dynamodb.Table('table-Name')  # Replace with your DynamoDB table name
 
 HEADERS = {
     'Content-Type': 'application/json',
