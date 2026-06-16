@@ -2,10 +2,10 @@ import json
 import boto3
 
 dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('expenses')
+table = dynamodb.Table('table-name')  # Replace with your DynamoDB table name
 s3 = boto3.client('s3')
 
-RECEIPT_BUCKET = 'receipt-processor-project-storage'
+RECEIPT_BUCKET = '<RECEIPT_BUCKET_NAME>'
 
 HEADERS = {
     'Content-Type': 'application/json',
