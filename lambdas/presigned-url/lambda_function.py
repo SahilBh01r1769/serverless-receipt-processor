@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 s3 = boto3.client('s3')
-BUCKET_NAME = "receipt-processor-project-storage"
+BUCKET_NAME = "bucket-name"  # Replace with your S3 bucket name
 
 HEADERS = {
     'Content-Type': 'application/json',
