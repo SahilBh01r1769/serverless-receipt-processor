@@ -3,7 +3,7 @@ from decimal import Decimal
 from datetime import datetime
 
 dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('expenses')
+table = dynamodb.Table('table-name')  # Replace with your DynamoDB table name   
 
 def lambda_handler(event, context):
     record = event['expense_record']
