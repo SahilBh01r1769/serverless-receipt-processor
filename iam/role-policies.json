@@ -1,0 +1,32 @@
+{
+    "AttachedPolicies": [
+        {
+            "PolicyName": "AmazonTextractFullAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonTextractFullAccess"
+        },
+        {
+            "PolicyName": "AmazonRekognitionFullAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonRekognitionFullAccess"
+        },
+        {
+            "PolicyName": "AWSLambdaBasicExecutionRole",
+            "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        },
+        {
+            "PolicyName": "AmazonSNSFullAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonSNSFullAccess"
+        },
+        {
+            "PolicyName": "AmazonTextractServiceRole",
+            "PolicyArn": "arn:aws:iam::aws:policy/service-role/AmazonTextractServiceRole"
+        },
+        {
+            "PolicyName": "AmazonDynamoDBFullAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+        },
+        {
+            "PolicyName": "AmazonS3FullAccess",
+            "PolicyArn": "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        }
+    ]
+}
