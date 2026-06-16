@@ -147,8 +147,3 @@ A few non-obvious decisions worth knowing if you're reading the code:
 - **Presigned URLs are never cached** — both for image viewing and upload, since they expire; the frontend always requests a fresh one when needed.
 - **Currency parsing** — the ₹ symbol is preserved through a per-line regex rather than relying on naive string casing, since `.upper()` on certain encodings silently dropped the symbol.
 
----
-
-## License
-
-MIT (or update to whatever you prefer).
