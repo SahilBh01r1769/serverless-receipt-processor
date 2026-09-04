@@ -4,11 +4,13 @@ An AWS serverless receipt application I built to learn how managed cloud service
 
 A user signs in with Cognito, uploads a receipt directly to S3 through a presigned URL, and the S3 object event is routed through EventBridge into a Step Functions workflow. Textract performs generic OCR, custom Python logic selects the vendor, amount, date, and category, and the resulting expense is stored in DynamoDB for review and editing.
 
-> This project was built incrementally through the AWS Console. The repository was assembled afterward from the deployed Lambda code and exported configuration, then cleaned to represent the maintained workflow without pretending the original project was infrastructure-as-code first.
+## Why I built this
 
-## What I wanted to learn
+I wanted a project that forced me to use AWS services as one connected system rather than learning Lambda, S3, Cognito, or DynamoDB separately. Receipt processing gave that system a concrete workload: authenticate a user, move an image securely, react to an event, run several backend stages, persist user-scoped data, and expose the result through an authenticated application.
 
-The project started as a practical way to become comfortable with AWS service integration:
+The project was built incrementally through the AWS Console. Most of the learning came from making those boundaries work in practice—routing, CORS, IAM, token expiry, identity propagation, CloudFront/S3 access, and failure handling—not from drawing the final architecture first.
+
+The main AWS areas I wanted to become comfortable with were:
 
 - authenticated browser flows with **Cognito Authorization Code + PKCE**;
 - **API Gateway** routing and Cognito authorization;
@@ -76,22 +78,27 @@ The project uses `textract.detect_document_text()`. Textract returns generic OCR
 The custom parser in [`lambdas/review-categorize/lambda_function.py`](lambdas/review-categorize/lambda_function.py) handles:
 
 - **vendor detection** — known merchant matching, then header heuristics while skipping obvious metadata;
-- **total selection** — semantically ranked labels such as `GRAND TOTAL`, `AMOUNT PAID`, `NET TOTAL`, and `TOTAL`, followed by currency/decimal fallbacks;
+- **total selection** — semantically ranked labels such as `AMOUNT PAID`, `AMOUNT PAYABLE`, `GRAND TOTAL`, `NET TOTAL`, and `TOTAL`, followed by currency/decimal fallbacks;
 - **date extraction** — several common numeric and month-name formats;
 - **categorization** — vendor-based rules for common spending categories.
 
-### Why total selection needed iteration
+### The interesting part: resolving ambiguous totals
 
-A receipt can contain several plausible monetary values:
+A receipt can contain several perfectly valid monetary values, while only one is the amount the user actually paid:
 
 ```text
-SUBTOTAL       820.00
-CGST            24.60
-SGST            24.60
-TOTAL          869.20
+ITEM A          999.00
+SUBTOTAL        820.00
+CGST             24.60
+SGST             24.60
+TOTAL           869.20
 ```
 
-Early parsing logic could select an item amount or pre-tax subtotal when multiple total-like values were present. The maintained parser treats explicit final-payment labels as stronger evidence and ensures `TOTAL` does not accidentally match inside `SUBTOTAL`.
+A naive "largest number" rule would choose the ₹999.00 item price. A loose `TOTAL` regex can also accidentally match the word `SUBTOTAL` and return ₹820.00. Both happened as the parser evolved.
+
+The maintained parser first looks for explicit payment/final-total labels and ranks them by meaning. Strong labels such as `AMOUNT PAID`, `AMOUNT PAYABLE`, `GRAND TOTAL`, and `NET TOTAL` outrank plain `TOTAL`; `TOTAL` is matched as its own label so it cannot match inside `SUBTOTAL`. Only when no labeled candidate exists does the parser fall back to currency-prefixed values and then standalone decimal amounts.
+
+That logic is intentionally heuristic rather than pretending every receipt follows one schema. The regression tests preserve the cases that caused the ranking to change.
 
 Other failures encountered during testing included incomplete OCR, inconsistent `₹` / `Rs` / `INR` formatting, and semantic OCR errors such as an item name being recognized as a different phrase. The parser can improve selection when the correct text exists in the OCR output; it cannot reliably reconstruct information that Textract itself misread.
 
@@ -231,7 +238,7 @@ serverless-receipt-processor/
     └── test_parser.py
 ```
 
-The deployed static frontend is still hosted through CloudFront/S3 but is not included in this repository snapshot yet.
+The deployed static frontend is hosted through CloudFront/S3. Its source is kept separate from the backend/configuration snapshot so the repository can stay focused on the AWS workflow and parsing logic.
 
 ## Known limitations
 
