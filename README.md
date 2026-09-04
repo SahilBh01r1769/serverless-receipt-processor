@@ -10,8 +10,6 @@
   <strong>Cognito · API Gateway · S3 · EventBridge · Step Functions · Lambda · Textract · DynamoDB · CloudFront</strong>
 </p>
 
-> **Visual placeholders:** put your GIF at `docs/media/upload-demo.gif`, homepage screenshot at `docs/media/dashboard.png`, and edit/review screenshot at `docs/media/review-edit.png`. The Markdown below will render automatically once those files exist.
-
 ---
 
 ## Architecture
