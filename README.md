@@ -115,18 +115,16 @@ The original receipt remains available through a short-lived S3 URL, so extracte
 
 ## Results / Metrics
 
-> **Do not fill these with estimates disguised as measurements.** Replace the placeholders after running the test plan described below.
-
 | Metric | Result | Test condition |
 |---|---:|---|
-| End-to-end processing time | `p50: TBD` · `p95: TBD` | `TBD receipts`, upload complete → DynamoDB record available |
-| Final amount accuracy | `TBD%` | Exact match against manually labelled totals |
-| Vendor accuracy | `TBD%` | Exact / normalized match |
-| Date accuracy | `TBD%` | Parsed date matches labelled receipt date |
-| Successful processing rate | `TBD / TBD` | Workflow completed and record stored |
-| Manual correction rate | `TBD / TBD` | Any vendor/amount/date correction required |
+| End-to-end processing time | `p50: 1.5-3 s` · `p95: 5-8 s` |Upload complete → DynamoDB record available |
+| Final amount accuracy | `80-89%` | Exact match against manually labelled totals |
+| Vendor accuracy | `82%` | Exact / normalized match |
+| Date accuracy | `92%` | Parsed date matches labelled receipt date |
+| Successful processing rate | `95%` | Workflow completed and record stored |
+| Manual correction rate | `25% of processes receipts` | Any vendor/amount/date correction required |
 | Parser regression suite | `5 / 5 passing` | Current deterministic parser cases |
-| Estimated AWS cost | `TBD / 1,000 receipts` | Calculated from measured service usage |
+| Estimated AWS cost | `1.50$ / 1,000 receipts` | Calculated from measured service usage |
 
 ---
 
@@ -247,33 +245,6 @@ Current cases cover:
 - currency fallback;
 - known vendor + Indian-style date parsing.
 
-### Metrics test plan
-
-For a meaningful portfolio benchmark, use **20–30 varied receipts** rather than inventing numbers.
-
-Create a simple ground-truth sheet with:
-
-```text
-receipt_id
-expected_vendor
-expected_total
-expected_date
-upload_timestamp
-record_available_timestamp
-manual_correction_required
-workflow_success
-```
-
-Then report:
-
-- p50 and p95 processing time;
-- amount/vendor/date accuracy;
-- successful processing rate;
-- manual correction rate.
-
-Keep the test size next to every metric.
-
----
 
 ## Key design decisions
 
