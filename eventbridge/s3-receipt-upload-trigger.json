@@ -1,0 +1,27 @@
+{
+  "Name": "s3-receipt-upload-trigger",
+  "EventPattern": {
+    "source": ["aws.s3"],
+    "detail-type": ["Object Created"],
+    "detail": {
+      "bucket": {
+        "name": ["receipt-processor-project-storage"]
+      }
+    }
+  },
+  "Target": {
+    "Type": "StepFunctionsStateMachine",
+    "Name": "ReceiptProcessorWorkflow",
+    "InputTransformer": {
+      "InputPathsMap": {
+        "bucket": "$.detail.bucket.name",
+        "key": "$.detail.object.key"
+      },
+      "InputTemplate": {
+        "bucket": "<bucket>",
+        "key": "<key>",
+        "user_id": "test-user"
+      }
+    }
+  }
+}
