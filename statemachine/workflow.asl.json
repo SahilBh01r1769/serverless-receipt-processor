@@ -30,28 +30,7 @@
         "Payload.$": "$.parse_result.Payload"
       },
       "ResultPath": "$.save_result",
-      "Next": "ShouldSendReport"
-    },
-    "ShouldSendReport": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.parse_result.Payload.should_send_report",
-          "BooleanEquals": true,
-          "Next": "GenerateMonthlyReport"
-        }
-      ],
-      "Default": "Success"
-    },
-    "GenerateMonthlyReport": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Parameters": {
-        "FunctionName": "arn:aws:lambda:Region:AccountID:function:GenerateMonthlyReport",
-        "Payload.$": "$.parse_result.Payload"
-      },
-      "ResultPath": "$.report_result",
-      "End": true
+      "Next": "Success"
     },
     "Success": {
       "Type": "Succeed"
