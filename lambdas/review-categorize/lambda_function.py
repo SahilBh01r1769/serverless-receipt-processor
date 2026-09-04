@@ -127,17 +127,16 @@ def _detect_vendor(lines: list, u_lines: list) -> str:
 # Total / amount detection
 # ---------------------------------------------------------------------------
 
-# Patterns applied to EACH LINE (not the whole blob) — line already uppercased
-# Group 1 must capture the numeric amount string.
+# Labeled total patterns are ordered by semantic confidence. Currency-only
+# amounts are deliberately handled later as a fallback so an item price does
+# not compete with an explicitly labeled receipt total.
 _TOTAL_LABEL_PATTERNS = [
-    # Explicit grand / net total labels
-    r'(?:GRAND\s+)?TOTAL\s*(?:AMT|AMOUNT)?\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-    r'NET\s+(?:TOTAL|AMOUNT|PAYABLE)\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-    r'(?:AMOUNT|AMT)\s+(?:DUE|PAID|PAYABLE)\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-    r'(?:BALANCE|BAL)\s+DUE\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-    r'YOU\s+(?:PAY|PAID)\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-    # Currency symbol followed by amount anywhere on the line
-    r'(?:RS\.?|INR|₹)\s*([\d,]+\.?\d*)',
+    (0, r'\bGRAND\s+TOTAL\b\s*(?:AMT|AMOUNT)?\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
+    (0, r'\bNET\s+(?:TOTAL|AMOUNT|PAYABLE)\b\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
+    (0, r'\b(?:AMOUNT|AMT)\s+(?:DUE|PAID|PAYABLE)\b\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
+    (0, r'\b(?:BALANCE|BAL)\s+DUE\b\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
+    (0, r'\bYOU\s+(?:PAY|PAID)\b\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
+    (1, r'\bTOTAL\b\s*(?:AMT|AMOUNT)?\s*[:\-=]?\s*(?:RS\.?|INR|₹)?\s*([\d,]+\.?\d*)'),
 ]
 
 # Minimum credible receipt total (₹1) — filters out item counts, barcodes, etc.
@@ -155,34 +154,36 @@ def _parse_amount(s: str) -> float:
 
 def _detect_total(lines: list, u_lines: list, upper_blob: str) -> float:
     """
-    Strategy 1 – labeled line scan (high confidence, picks LAST / LARGEST match
-                  so grand total wins over sub-totals).
-    Strategy 2 – largest standalone currency amount in entire text.
+    Strategy 1 – scan explicitly labeled final-total lines. Stronger labels
+                 such as GRAND TOTAL / AMOUNT PAID win over plain TOTAL;
+                 ties prefer the later occurrence on the receipt.
+    Strategy 2 – largest standalone currency amount in the entire text.
+    Strategy 3 – largest standalone decimal number as a last resort.
     """
     _detect_total._last_strategy = 'none'
 
-    candidates = []  # (amount, line_index, pattern_priority)
+    candidates = []  # (semantic_priority, line_index, amount)
 
-    for idx, (ul, line) in enumerate(zip(u_lines, lines)):
-        combined = ul  # already upper
+    for idx, ul in enumerate(u_lines):
+        for priority, pattern in _TOTAL_LABEL_PATTERNS:
+            m = re.search(pattern, ul)
+            if not m:
+                continue
 
-        for priority, pattern in enumerate(_TOTAL_LABEL_PATTERNS):
-            m = re.search(pattern, combined)
-            if m:
-                amount = _parse_amount(m.group(1))
-                if _MIN_AMOUNT <= amount <= _MAX_AMOUNT:
-                    candidates.append((amount, idx, priority))
-                break  # one pattern per line is enough
+            amount = _parse_amount(m.group(1))
+            if _MIN_AMOUNT <= amount <= _MAX_AMOUNT:
+                candidates.append((priority, idx, amount))
+            break  # one labeled-total pattern per line is enough
 
     if candidates:
         _detect_total._last_strategy = 'labeled_line'
-        # Prefer lower-priority (more specific) patterns; break ties by taking
-        # the LAST occurrence (grand total is usually printed after sub-totals).
-        candidates.sort(key=lambda c: (c[2], c[1]))
-        return candidates[0][0]   # highest-priority pattern, first match wins
-        # If you want the largest value instead: return max(c[0] for c in candidates)
+        # Lower semantic priority is stronger. For equally strong labels,
+        # prefer the later line because final payable totals usually appear
+        # after intermediate calculations.
+        candidates.sort(key=lambda c: (c[0], -c[1], -c[2]))
+        return candidates[0][2]
 
-    # Strategy 2 — scan for all ₹/Rs amounts and return the largest
+    # Strategy 2 — scan for all ₹/Rs/INR amounts and return the largest.
     fallback_amounts = []
     for m in re.finditer(
         r'(?:RS\.?|INR|₹)\s*([\d,]+\.?\d*)', upper_blob
@@ -195,7 +196,7 @@ def _detect_total(lines: list, u_lines: list, upper_blob: str) -> float:
         _detect_total._last_strategy = 'largest_currency_amount'
         return max(fallback_amounts)
 
-    # Strategy 3 — largest standalone decimal number on the page
+    # Strategy 3 — largest standalone decimal number on the page.
     all_numbers = [
         _parse_amount(m.group())
         for m in re.finditer(r'\b\d{1,6}(?:,\d{3})*\.\d{2}\b', upper_blob)
