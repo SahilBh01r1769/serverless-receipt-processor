@@ -1,0 +1,447 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless Receipt Processor - Cognito-authenticated receipt upload,
+  S3/EventBridge/Step Functions OCR pipeline, DynamoDB storage, API Gateway CRUD,
+  and CloudFront-hosted frontend.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+
+  CognitoDomainPrefix:
+    Type: String
+    Description: >
+      Unique Cognito hosted UI domain prefix for this deployment
+      (for example: receipt-processor-yourname).
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    MemorySize: 128
+    Tracing: PassThrough
+
+Resources:
+
+  ReceiptBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - '*'
+            MaxAge: 300
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  ExpensesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: expense_id
+          AttributeType: S
+        - AttributeName: upload_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: expense_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-upload_date-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: upload_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ReceiptUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  ReceiptUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref ReceiptUserPool
+
+  ReceiptUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref ReceiptUserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub 'https://${FrontendDistribution.DomainName}'
+      LogoutURLs:
+        - !Sub 'https://${FrontendDistribution.DomainName}'
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+
+  ReceiptApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+        MaxAge: "'300'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt ReceiptUserPool.Arn
+
+  GeneratePresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/presigned-url/
+      Handler: lambda_function.lambda_handler
+      Timeout: 3
+      Environment:
+        Variables:
+          RECEIPT_BUCKET: !Ref ReceiptBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref ReceiptBucket
+      Events:
+        UploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReceiptApi
+            Path: /upload-url
+            Method: POST
+
+  GetExpensesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/get-expenses/
+      Handler: lambda_function.lambda_handler
+      Timeout: 3
+      Environment:
+        Variables:
+          EXPENSES_TABLE: !Ref ExpensesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExpensesTable
+      Events:
+        GetExpenses:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReceiptApi
+            Path: /expenses
+            Method: GET
+
+  UpdateExpensesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/update-expense/
+      Handler: lambda_function.lambda_handler
+      Timeout: 3
+      Environment:
+        Variables:
+          EXPENSES_TABLE: !Ref ExpensesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExpensesTable
+      Events:
+        UpdateExpense:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReceiptApi
+            Path: /expenses/{expense_id}
+            Method: PUT
+
+  DeleteExpenseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/delete-expense/
+      Handler: lambda_function.lambda_handler
+      Timeout: 3
+      Environment:
+        Variables:
+          EXPENSES_TABLE: !Ref ExpensesTable
+          RECEIPT_BUCKET: !Ref ReceiptBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExpensesTable
+        - S3CrudPolicy:
+            BucketName: !Ref ReceiptBucket
+      Events:
+        DeleteExpense:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReceiptApi
+            Path: /expenses/{expense_id}
+            Method: DELETE
+
+  GetReceiptUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/receipt-url/
+      Handler: lambda_function.lambda_handler
+      Timeout: 3
+      Environment:
+        Variables:
+          EXPENSES_TABLE: !Ref ExpensesTable
+          RECEIPT_BUCKET: !Ref ReceiptBucket
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExpensesTable
+        - S3ReadPolicy:
+            BucketName: !Ref ReceiptBucket
+      Events:
+        ReceiptImage:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReceiptApi
+            Path: /expenses/{expense_id}/image
+            Method: GET
+
+  TextractAnalyzerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/textract-extract/
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ReceiptBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - textract:DetectDocumentText
+              Resource: '*'
+
+  ReviewAndCategorizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/review-categorize/
+      Handler: lambda_function.lambda_handler
+      Timeout: 30
+
+  SaveToDatabaseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/save-to-db/
+      Handler: lambda_function.lambda_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          EXPENSES_TABLE: !Ref ExpensesTable
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ExpensesTable
+
+  ReceiptProcessorWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: EXPRESS
+      Definition:
+        Comment: Receipt processing workflow
+        StartAt: TextractAnalyzer
+        States:
+          TextractAnalyzer:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt TextractAnalyzerFunction.Arn
+              Payload.$: $
+            ResultPath: $.textract_result
+            Next: ReviewAndCategorize
+
+          ReviewAndCategorize:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt ReviewAndCategorizeFunction.Arn
+              Payload.$: $.textract_result.Payload
+            ResultPath: $.parse_result
+            Next: SaveToDatabase
+
+          SaveToDatabase:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt SaveToDatabaseFunction.Arn
+              Payload.$: $.parse_result.Payload
+            ResultPath: $.save_result
+            Next: Success
+
+          Success:
+            Type: Succeed
+
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref TextractAnalyzerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ReviewAndCategorizeFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SaveToDatabaseFunction
+
+      Events:
+        ReceiptUploaded:
+          Type: EventBridgeRule
+          Properties:
+            RuleName: !Sub '${AWS::StackName}-receipt-upload'
+            State: ENABLED
+            Pattern:
+              source:
+                - aws.s3
+              detail-type:
+                - Object Created
+              detail:
+                bucket:
+                  name:
+                    - !Ref ReceiptBucket
+            InputTransformer:
+              InputPathsMap:
+                bucket: $.detail.bucket.name
+                key: $.detail.object.key
+              InputTemplate: '{"bucket":"<bucket>","key":"<key>"}'
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-frontend-oac'
+        Description: OAC for the private receipt processor frontend bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref FrontendOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+Outputs:
+  ApiBaseUrl:
+    Description: REST API base URL
+    Value: !Sub 'https://${ReceiptApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}'
+
+  CognitoUserPoolId:
+    Value: !Ref ReceiptUserPool
+
+  CognitoClientId:
+    Value: !Ref ReceiptUserPoolClient
+
+  CognitoDomain:
+    Value: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+
+  FrontendUrl:
+    Value: !Sub 'https://${FrontendDistribution.DomainName}'
+
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+
+  ReceiptBucketName:
+    Value: !Ref ReceiptBucket
+
+  ExpensesTableName:
+    Value: !Ref ExpensesTable
+
+  StateMachineArn:
+    Value: !Ref ReceiptProcessorWorkflow
