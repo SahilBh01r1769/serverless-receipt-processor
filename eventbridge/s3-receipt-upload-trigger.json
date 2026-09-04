@@ -19,8 +19,7 @@
       },
       "InputTemplate": {
         "bucket": "<bucket>",
-        "key": "<key>",
-        "user_id": "test-user"
+        "key": "<key>"
       }
     }
   }
