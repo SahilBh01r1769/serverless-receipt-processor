@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Receipt Processor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Auth loading screen (shown while exchanging code for token) -->
+<div id="auth-loading">
+  <div class="spinner" style="width:22px;height:22px;border-width:2px;color:var(--amber)"></div>
+  <p>Signing you in…</p>
+</div>
+
+<div id="app" style="display:none">
+  <nav class="topbar">
+    <span class="topbar-title">
+      <i class="ti ti-receipt" aria-hidden="true"></i> Receipt processor
+    </span>
+    <div class="topbar-right">
+      <span class="user-pill" id="user-email">—</span>
+      <button class="signout-btn" onclick="signOut()">
+        <i class="ti ti-logout" aria-hidden="true"></i> Sign out
+      </button>
+    </div>
+  </nav>
+
+  <main class="page">
+    <div class="panel">
+      <div class="panel-head">
+        <p class="panel-label"><i class="ti ti-upload" aria-hidden="true"></i> Upload</p>
+      </div>
+      <div class="panel-body">
+        <input type="file" id="fi" accept="image/*" style="display:none">
+        <div class="drop-zone" id="dz" onclick="document.getElementById('fi').click()"
+             role="button" tabindex="0" aria-label="Click or drag to upload receipt">
+          <i class="ti ti-photo-scan dz-icon" aria-hidden="true"></i>
+          <p class="dz-label">Drop receipt here</p>
+          <p class="dz-hint">JPEG, PNG — max 10 MB</p>
+        </div>
+        <div id="fp">
+          <img id="pt" src="" alt="Receipt preview">
+          <div style="flex:1;min-width:0">
+            <p class="fp-name" id="pn"></p>
+            <p class="fp-size" id="ps"></p>
+          </div>
+          <button class="rm-btn" onclick="clearFile()" aria-label="Remove"><i class="ti ti-x"></i></button>
+        </div>
+        <div class="prog-wrap" id="pw">
+          <div class="prog-track"><div class="prog-bar" id="pb"></div></div>
+          <p class="prog-lbl" id="pl"></p>
+        </div>
+        <div class="status" id="sb" role="status"></div>
+        <button class="up-btn" id="ub" onclick="uploadReceipt()" disabled>
+          <i class="ti ti-upload" aria-hidden="true"></i> Upload receipt
+        </button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <p class="panel-label"><i class="ti ti-receipt" aria-hidden="true"></i> Expenses</p>
+        <div class="panel-head-actions">
+          <select class="field-select" id="sort-select" onchange="renderExpenseList()" style="padding:4px 8px;font-size:12px;width:auto;">
+            <option value="date-desc">Newest first</option>
+            <option value="date-asc">Oldest first</option>
+          </select>
+          <button class="ref-btn" onclick="loadExpenses()" aria-label="Refresh">
+            <i class="ti ti-refresh" style="font-size:15px"></i>
+          </button>
+        </div>
+      </div>
+      <div class="stats" id="sr" style="display:none">
+        <div class="stat"><div class="stat-v" id="sv">—</div><div class="stat-l">Total spent</div></div>
+        <div class="stat"><div class="stat-v" id="sm">—</div><div class="stat-l">This month</div></div>
+        <div class="stat"><div class="stat-v" id="sc">—</div><div class="stat-l">Receipts</div></div>
+      </div>
+      <div class="exp-list" id="el">
+        <div class="empty"><i class="ti ti-receipt-off"></i><p>No expenses yet</p></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Edit expense modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this) closeModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <p class="modal-title">Edit expense</p>
+      <button class="modal-close" onclick="closeModal()" aria-label="Close"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="modal-split">
+      <div class="modal-image-pane" id="ef-image-pane">
+        <p class="receipt-img-msg" id="ef-image-msg">Loading receipt…</p>
+      </div>
+      <div class="modal-body">
+        <div>
+          <label class="field-label" for="ef-vendor">Vendor</label>
+          <input type="text" id="ef-vendor" class="field-input" maxlength="100">
+        </div>
+        <div>
+          <label class="field-label" for="ef-amount">Amount</label>
+          <div class="amount-input-wrap">
+            <span class="amount-prefix">₹</span>
+            <input type="number" id="ef-amount" class="field-input" min="0" step="0.01">
+          </div>
+        </div>
+        <div>
+          <label class="field-label" for="ef-category">Category</label>
+          <select id="ef-category" class="field-select">
+            <option>Food &amp; Dining</option>
+            <option>Groceries</option>
+            <option>Online Shopping</option>
+            <option>Fuel &amp; Transport</option>
+            <option>Health &amp; Pharmacy</option>
+            <option>Utilities</option>
+            <option>Fashion</option>
+            <option>Miscellaneous</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label" for="ef-date">Date</label>
+          <input type="text" id="ef-date" class="field-input" placeholder="YYYY-MM-DD or as on receipt">
+        </div>
+        <div>
+          <label class="field-label">Raw extracted text</label>
+          <div class="raw-text-box" id="ef-raw"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-danger" id="ef-delete" onclick="deleteExpense()">
+        <i class="ti ti-trash" aria-hidden="true"></i> Delete
+      </button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="ef-save" onclick="saveExpenseEdit()">
+        <i class="ti ti-check" aria-hidden="true"></i> Save changes
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-stack" id="toast-stack"></div>
+
+<script src="app.js"></script>
+
+</body>
+</html>
