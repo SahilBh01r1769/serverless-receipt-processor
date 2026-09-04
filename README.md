@@ -1,201 +1,122 @@
-<h1 align="center">Serverless Receipt Processor</h1>
+# Serverless Receipt Processor
 
-<p align="center">
-  <strong>Authenticated receipt ingestion, OCR extraction, automatic expense categorization, and per-user expense storage — built entirely on AWS managed services.</strong>
-</p>
+An AWS serverless receipt application I built to learn how managed cloud services behave when they have to work together in a real authenticated workflow—not just as isolated examples.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonaws&logoColor=white" alt="AWS Serverless" />
-  <img src="https://img.shields.io/badge/Python-Lambda-3776AB?logo=python&logoColor=white" alt="Python Lambda" />
-  <img src="https://img.shields.io/badge/OCR-Amazon%20Textract-FF9900?logo=amazonaws&logoColor=white" alt="Amazon Textract" />
-  <img src="https://img.shields.io/badge/Orchestration-Step%20Functions-8A2BE2" alt="AWS Step Functions" />
-  <img src="https://img.shields.io/badge/Auth-Cognito-7B42BC" alt="Amazon Cognito" />
-  <img src="https://img.shields.io/badge/Database-DynamoDB-4053D6?logo=amazondynamodb&logoColor=white" alt="DynamoDB" />
-</p>
+A user signs in with Cognito, uploads a receipt directly to S3 through a presigned URL, and the S3 object event is routed through EventBridge into a Step Functions workflow. Textract performs generic OCR, custom Python logic selects the vendor, amount, date, and category, and the resulting expense is stored in DynamoDB for review and editing.
 
----
+> This project was built incrementally through the AWS Console. The repository was assembled afterward from the deployed Lambda code and exported configuration, then cleaned to represent the maintained workflow without pretending the original project was infrastructure-as-code first.
 
-## Overview
+## What I wanted to learn
 
-This project is an end-to-end **serverless receipt-processing pipeline** on AWS. A signed-in user uploads a receipt image, the backend extracts receipt text with Amazon Textract, parses useful expense fields, automatically categorizes the transaction, and stores the result as a user-scoped DynamoDB record.
+The project started as a practical way to become comfortable with AWS service integration:
 
-The deployed application also exposes authenticated CRUD APIs for reviewing and managing expenses, while original receipt images remain in S3 and are accessed through short-lived presigned URLs.
+- authenticated browser flows with **Cognito Authorization Code + PKCE**;
+- **API Gateway** routing and Cognito authorization;
+- direct browser-to-**S3** uploads using presigned URLs;
+- event-driven processing with **EventBridge** and **Step Functions**;
+- **Lambda** execution roles and service-to-service permissions;
+- generic OCR with **Amazon Textract**;
+- user-scoped storage and access patterns in **DynamoDB**;
+- private static hosting with **CloudFront + S3 Origin Access Control**.
 
-### At a glance
+Receipt parsing became the main application-specific problem inside that cloud workflow: Textract can detect text, but the application still has to decide which detected value is actually the final amount, which line is the merchant, and what should happen when OCR is wrong.
 
-| Capability | Implementation |
-|---|---|
-| Authentication | Amazon Cognito with Authorization Code + PKCE |
-| Direct receipt upload | Presigned Amazon S3 PUT URL |
-| Upload event routing | Amazon S3 Object Created events through Amazon EventBridge |
-| OCR | Amazon Textract |
-| Workflow orchestration | AWS Step Functions |
-| Receipt parsing | Python Lambda logic for vendor, total, date, and category |
-| Expense storage | Amazon DynamoDB |
-| Per-user isolation | Cognito `sub`, user-scoped S3 keys, DynamoDB queries by `user_id` |
-| API layer | Amazon API Gateway + Cognito authorizer |
-| Receipt retrieval | Fresh presigned S3 URLs |
-| Frontend delivery | Static SPA deployed through CloudFront |
-
----
-
-## Architecture
+## Live workflow
 
 ```mermaid
 flowchart LR
-    U[User / Browser] -->|Sign in| COG[Amazon Cognito]
-    U -->|Authenticated API call| API[API Gateway]
-    API --> PRE[Lambda: presigned-url]
+    U[Browser] -->|Sign in with PKCE| COG[Amazon Cognito]
+    U -->|Authenticated API calls| API[API Gateway]
+
+    API --> PRE[GeneratePresignedUrl Lambda]
     PRE -->|Presigned PUT URL| U
+    U -->|Receipt image| S3[(S3 receipt bucket)]
 
-    U -->|Upload receipt| S3[(Amazon S3)]
     S3 -->|Object Created| EB[Amazon EventBridge]
-    EB --> SF[AWS Step Functions]
+    EB --> SF[ReceiptProcessorWorkflow]
 
-    SF --> TEX[Lambda: textract-extract]
-    TEX --> AT[Amazon Textract]
-    AT --> TEX
+    SF --> TEX[TextractAnalyzer Lambda]
+    TEX --> OCR[Amazon Textract\nDetectDocumentText]
+    OCR --> TEX
+    TEX --> PARSE[ReviewAndCategorize Lambda]
+    PARSE --> SAVE[SaveToDatabase Lambda]
+    SAVE --> DB[(DynamoDB expenses)]
 
-    TEX --> REV[Lambda: review-categorize]
-    REV --> SAVE[Lambda: save-to-db]
-    SAVE --> DDB[(Amazon DynamoDB)]
+    API --> GET[GetExpenses]
+    API --> UPDATE[UpdateExpenses]
+    API --> DELETE[DeleteExpense]
+    API --> IMAGE[getReceiptURL]
 
-    API --> GET[Lambda: get-expenses]
-    API --> UPD[Lambda: update-expense]
-    API --> DEL[Lambda: delete-expense]
-    API --> IMG[Lambda: receipt-url]
-
-    GET --> DDB
-    UPD --> DDB
-    DEL --> DDB
-    IMG --> DDB
-    IMG --> S3
+    GET --> DB
+    UPDATE --> DB
+    DELETE --> DB
+    DELETE --> S3
+    IMAGE --> DB
+    IMAGE --> S3
 ```
 
-### Processing flow
+### Processing path
+
+1. The browser authenticates through Cognito's hosted login using Authorization Code + PKCE.
+2. `POST /upload-url` returns a short-lived, user-scoped presigned S3 PUT URL.
+3. The browser uploads the receipt directly to S3 instead of sending the image through API Gateway or Lambda.
+4. S3 emits an `Object Created` event to EventBridge.
+5. EventBridge starts the `ReceiptProcessorWorkflow` Step Functions state machine.
+6. `TextractAnalyzer` calls `DetectDocumentText` and passes the returned LINE blocks forward.
+7. `ReviewAndCategorize` applies the custom receipt parser and builds an expense record.
+8. `SaveToDatabase` stores the record in DynamoDB.
+9. The authenticated dashboard can list, edit, delete, and retrieve the original receipt image through the API.
+
+The maintained EventBridge configuration is captured in [`eventbridge/s3-receipt-upload-trigger.json`](eventbridge/s3-receipt-upload-trigger.json), and the cleaned state-machine definition is in [`statemachine/workflow.asl.json`](statemachine/workflow.asl.json).
+
+## What Textract does vs. what the parser does
+
+The project uses `textract.detect_document_text()`. Textract returns generic OCR blocks; it does **not** decide which number is the final amount or which line is the vendor.
+
+The custom parser in [`lambdas/review-categorize/lambda_function.py`](lambdas/review-categorize/lambda_function.py) handles:
+
+- **vendor detection** — known merchant matching, then header heuristics while skipping obvious metadata;
+- **total selection** — semantically ranked labels such as `GRAND TOTAL`, `AMOUNT PAID`, `NET TOTAL`, and `TOTAL`, followed by currency/decimal fallbacks;
+- **date extraction** — several common numeric and month-name formats;
+- **categorization** — vendor-based rules for common spending categories.
+
+### Why total selection needed iteration
+
+A receipt can contain several plausible monetary values:
 
 ```text
-Authenticated user
-      ↓
-POST /upload-url
-      ↓
-Presigned S3 upload
-      ↓
-Receipt image stored under uploads/{user_id}/...
-      ↓
-S3 Object Created event
-      ↓
-EventBridge rule
-      ↓
-Step Functions workflow
-      ↓
-Textract OCR
-      ↓
-Parse + categorize receipt
-      ↓
-Save structured expense record
-      ↓
-DynamoDB
+SUBTOTAL       820.00
+CGST            24.60
+SGST            24.60
+TOTAL          869.20
 ```
 
----
+Early parsing logic could select an item amount or pre-tax subtotal when multiple total-like values were present. The maintained parser treats explicit final-payment labels as stronger evidence and ensures `TOTAL` does not accidentally match inside `SUBTOTAL`.
 
-## Step Functions workflow
+Other failures encountered during testing included incomplete OCR, inconsistent `₹` / `Rs` / `INR` formatting, and semantic OCR errors such as an item name being recognized as a different phrase. The parser can improve selection when the correct text exists in the OCR output; it cannot reliably reconstruct information that Textract itself misread.
 
-The OCR path is deliberately broken into separate responsibilities instead of one large Lambda:
+Because of that limitation, the application preserves the original receipt image and allows users to correct extracted expense fields from the dashboard.
 
-1. **`textract-extract`** — runs Textract and forwards OCR blocks.
-2. **`review-categorize`** — extracts receipt text, detects vendor / total / date, applies categorization rules, and builds the expense record.
-3. **`save-to-db`** — normalizes the record and persists it to DynamoDB.
+## Authentication and data isolation
 
-<p align="center">
-  <img src="statemachine/stepfunctions_graph.svg" alt="Receipt processor Step Functions workflow" width="760" />
-</p>
+The API Gateway methods are protected by a Cognito user-pool authorizer.
 
-The exported state machine definition is available at [`statemachine/workflow.asl.json`](statemachine/workflow.asl.json).
-
----
-
-## Receipt intelligence
-
-The parser is designed around real-world receipt variation rather than one rigid template.
-
-### Vendor detection
-
-The categorization Lambda checks known merchants first and then falls back to receipt-header heuristics while filtering common non-vendor lines such as GST, tax, invoice, date, phone, and address text.
-
-### Amount extraction
-
-Multiple strategies are used in sequence:
-
-- labeled totals such as `TOTAL`, `NET AMOUNT`, `AMOUNT PAID`, and `BALANCE DUE`
-- currency-prefixed values such as `₹`, `Rs`, and `INR`
-- largest plausible currency amount
-- largest standalone decimal amount as a final fallback
-
-### Date extraction
-
-The parser supports several common formats, including:
-
-```text
-YYYY-MM-DD
-DD/MM/YYYY
-DD-MM-YYYY
-DD/MM/YY
-15 Jul 2024
-15-Jul-24
-```
-
-### Automatic categories
-
-Vendor and receipt text are matched against practical categories such as:
-
-`Food & Dining` · `Groceries` · `Online Shopping` · `Fuel & Transport` · `Health & Pharmacy` · `Utilities` · `Miscellaneous`
-
----
-
-## Authentication & data isolation
-
-The API is protected by a Cognito authorizer. Lambda functions read the authenticated user's Cognito `sub` from API Gateway claims rather than accepting an arbitrary user ID from the client.
-
-Receipt uploads are stored using a user-scoped key pattern:
+Receipt object keys are created under:
 
 ```text
 uploads/{user_id}/{timestamp}-{uuid}.jpg
 ```
 
-That user identity is carried through the processing pipeline and stored with the final expense record. Expense listing uses the DynamoDB `user_id-upload_date-index`, so users query only records associated with their own identity.
+The `user_id` is the authenticated Cognito `sub`. In the maintained processing code, `TextractAnalyzer` derives that identity from the user-scoped object key and carries it through the workflow rather than accepting a free-form user ID from the processing event.
 
-Presigned upload and image-view URLs are short-lived and generated only when requested.
-
----
-
-## API
-
-All application routes are protected by the Cognito authorizer.
-
-| Method | Route | Purpose |
-|---|---|---|
-| `POST` | `/upload-url` | Generate a presigned S3 URL for a new receipt |
-| `GET` | `/expenses` | Return recent expenses for the authenticated user |
-| `PUT` | `/expenses/{expense_id}` | Update an expense |
-| `DELETE` | `/expenses/{expense_id}` | Delete an expense |
-| `GET` | `/expenses/{expense_id}/image` | Generate a fresh URL for the original receipt image |
-
-The exported API Gateway definition is available in [`api-gateway/receipt_processor_API-prod-swagger.json`](api-gateway/receipt_processor_API-prod-swagger.json).
-
----
-
-## Data model
-
-The DynamoDB table uses a composite primary key:
+DynamoDB uses:
 
 ```text
 Partition key: user_id
 Sort key:      expense_id
 ```
 
-and a GSI for chronological per-user queries:
+with a GSI for chronological per-user queries:
 
 ```text
 user_id-upload_date-index
@@ -203,54 +124,96 @@ Partition key: user_id
 Sort key:      upload_date
 ```
 
-A processed record is shaped roughly like this:
+This keeps list/read/update/delete operations scoped to the authenticated user.
 
-```json
-{
-  "user_id": "cognito-sub",
-  "expense_id": "uuid",
-  "vendor": "DMart",
-  "amount": 1249.50,
-  "category": "Groceries",
-  "expense_date": "2026-06-11",
-  "upload_date": "2026-06-11T12:34:56",
-  "original_key": "uploads/user-id/receipt.jpg",
-  "raw_text": "...",
-  "status": "processed"
-}
+## API surface
+
+The maintained route set is:
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/upload-url` | Generate a user-scoped presigned S3 upload URL |
+| `GET` | `/expenses` | Return recent expenses for the authenticated user |
+| `PUT` | `/expenses/{expense_id}` | Update allowed expense fields after ownership verification |
+| `DELETE` | `/expenses/{expense_id}` | Delete an expense and best-effort remove its receipt image |
+| `GET` | `/expenses/{expense_id}/image` | Generate a short-lived presigned S3 GET URL |
+
+The console export under [`api-gateway/`](api-gateway/) is retained as a historical deployment snapshot. It contains one documented stale `PUT /expenses` method from an earlier routing mistake; [`api-gateway/README.md`](api-gateway/README.md) explains the difference between that snapshot and the maintained route set.
+
+## Problems I actually had to debug
+
+The finished diagram hides most of the difficult work. Some of the issues encountered while building the system were:
+
+| Symptom | Root cause | Fix / lesson |
+|---|---|---|
+| CloudFront returned `Access Denied` | Distribution used the wrong origin configuration, so OAC could not sign requests to the private S3 origin | Corrected the S3 origin configuration, attached OAC, and redeployed |
+| CloudFront kept serving old frontend files | Cached objects were still valid | Invalidated changed paths after S3 uploads |
+| `403 Missing Authentication Token` during update | `PUT` was initially created on `/expenses` instead of `/expenses/{expense_id}` | Fixed the API Gateway resource/method mapping instead of treating it as a Cognito failure |
+| DELETE failed only in the browser | CORS preflight did not allow `DELETE` | Updated the `OPTIONS` response and redeployed the API stage |
+| CORS looked broken after the fix | Browser cached the old preflight response | Retested after clearing the cached response |
+| PUT worked from Postman but failed from the browser | Cognito ID token expired during a long debugging session | Re-authenticated and checked token lifetime before changing backend code |
+| Cognito login succeeded but redirect failed | CloudFront URL was missing from allowed callback URLs | Added the deployed frontend URL to the app client configuration |
+| Update Lambda failed before `UpdateItem` | Its execution role lacked DynamoDB permission for the ownership `GetItem` check | Corrected the Lambda role/policy |
+| Valid expense returned `404 Expense not found` | Early records were stored under `test-user`, so the DynamoDB composite key did not match the Cognito `sub` | Fixed identity propagation through the user-scoped S3 key |
+
+A longer record of these failures and what they taught me is in [`docs/engineering-notes.md`](docs/engineering-notes.md).
+
+## Parser regression tests
+
+The small regression suite in [`tests/test_parser.py`](tests/test_parser.py) checks the custom parser without repeatedly calling Textract. This does not replace AWS testing—the deployed application still uses Textract for OCR. It simply makes deterministic parser behavior testable once OCR text is already known.
+
+Current cases cover:
+
+- subtotal + tax + final total;
+- an earlier `TOTAL` followed by a stronger `GRAND TOTAL`;
+- a large item price that should not beat an explicitly labeled total;
+- currency-only fallback behavior;
+- an Indian-style date plus known-vendor categorization.
+
+Run locally with:
+
+```bash
+python -m unittest tests/test_parser.py
 ```
 
-See [`storage/dynamo.json`](storage/dynamo.json) for the exported table definition.
+## Design decisions
 
----
+### Cognito PKCE instead of a client secret
 
-## Lambda responsibilities
+The frontend is a browser application, so it cannot safely keep a Cognito client secret. Authorization Code + PKCE provides a redirect-based login flow without embedding one in the client.
 
-| Lambda | Responsibility |
-|---|---|
-| `presigned-url` | Authenticates the request and generates a user-scoped S3 upload URL |
-| `textract-extract` | Executes receipt OCR through Amazon Textract |
-| `review-categorize` | Parses OCR output and categorizes the expense |
-| `save-to-db` | Writes the normalized expense record to DynamoDB |
-| `get-expenses` | Queries recent expenses using the user/date GSI |
-| `update-expense` | Updates editable expense fields |
-| `delete-expense` | Removes a user's expense record |
-| `receipt-url` | Generates a fresh URL for viewing the original receipt image |
+### Presigned S3 uploads
 
----
+Receipt images bypass API Gateway and Lambda. The browser receives a short-lived URL and uploads directly to S3, keeping binary payload handling out of the API path.
+
+### EventBridge between S3 and Step Functions
+
+The receipt bucket emits object-created events through EventBridge. EventBridge transforms the S3 event into the small `{bucket, key}` input expected by the workflow and targets the Step Functions state machine.
+
+### Step Functions for visible workflow stages
+
+OCR, parsing, and persistence are separate Lambda responsibilities. Step Functions makes those stages explicit and gives each step its own execution/failure boundary instead of hiding the entire pipeline inside one Lambda.
+
+### DynamoDB query pattern
+
+Expense listing uses the `user_id-upload_date-index` GSI rather than scanning the table. The application queries only the current user's partition and orders results by upload timestamp.
+
+### Human correction instead of pretending OCR is perfect
+
+OCR and heuristic parsing are best-effort. The application keeps the original receipt available through a short-lived S3 URL and lets the user correct vendor, amount, category, and date through the authenticated update endpoint.
 
 ## Repository structure
 
 ```text
 serverless-receipt-processor/
 ├── README.md
-├── api-gateway/
-│   ├── receipt_processor_API-prod-swagger.json
-│   └── restapi-paths
-├── cognito/
-│   └── config.json
-├── iam/
-│   └── role-policies.json
+├── api-gateway/          # historical console export + maintained route notes
+├── cognito/              # sanitized Cognito configuration snapshot
+├── docs/
+│   └── engineering-notes.md
+├── eventbridge/
+│   └── s3-receipt-upload-trigger.json
+├── iam/                  # sanitized IAM policy snapshot
 ├── lambdas/
 │   ├── delete-expense/
 │   ├── get-expenses/
@@ -261,77 +224,29 @@ serverless-receipt-processor/
 │   ├── textract-extract/
 │   └── update-expense/
 ├── statemachine/
-│   ├── stepfunctions_graph.png
-│   ├── stepfunctions_graph.svg
 │   └── workflow.asl.json
-└── storage/
-    └── dynamo.json
+├── storage/
+│   └── dynamo.json
+└── tests/
+    └── test_parser.py
 ```
 
-This repository captures the backend code and exported AWS configuration used by the deployed project. The deployed static frontend is not included in this repository snapshot.
+The deployed static frontend is still hosted through CloudFront/S3 but is not included in this repository snapshot yet.
 
----
+## Known limitations
 
-## AWS services used
+- Receipt parsing is heuristic and intentionally limited to a small set of useful expense fields.
+- OCR quality is controlled by Textract and depends on receipt image quality.
+- Semantic OCR errors cannot always be corrected downstream and may require user edits.
+- Categorization is vendor-based rather than a learned classifier.
+- The project was built console-first and is not currently a one-command SAM/CDK/Terraform deployment.
+- The application has been functionally tested as a personal project, not load-tested as a production service.
+- Receipt deletion removes the DynamoDB item first and treats S3 cleanup as best-effort, so an S3 failure can leave an orphaned image.
 
-| Service | Role in the system |
-|---|---|
-| **Amazon Cognito** | Authentication and token issuance |
-| **Amazon API Gateway** | Authenticated REST API |
-| **AWS Lambda** | Stateless business logic |
-| **Amazon S3** | Original receipt image storage and upload events |
-| **Amazon EventBridge** | Routes S3 Object Created events into the processing workflow |
-| **AWS Step Functions** | OCR pipeline orchestration |
-| **Amazon Textract** | Receipt OCR |
-| **Amazon DynamoDB** | Structured expense storage |
-| **Amazon CloudFront** | Frontend delivery in the deployed application |
-| **AWS IAM** | Service-to-service permissions |
+## Scope deliberately removed
 
----
-
-## Development and deployment
-
-The project was built incrementally through the AWS Console. The repository captures the Lambda code and exported configuration from that working deployment rather than presenting a reconstructed one-command deployment as if it were how the project was originally built.
-
-The live processing path uses an S3 `Object Created` event, an EventBridge rule, and the `ReceiptProcessorWorkflow` Step Functions state machine. Infrastructure-as-code is intentionally not the focus of this repository; the emphasis is on the AWS service integration and the application logic that was actually built and debugged.
-
----
-
-## Design decisions
-
-### PKCE for a public client
-
-The frontend uses Cognito's Authorization Code + PKCE flow because a browser SPA cannot securely hold a client secret.
-
-### Direct-to-S3 uploads
-
-Images do not pass through API Gateway or Lambda. The client receives a short-lived presigned URL and uploads directly to S3, reducing backend payload handling.
-
-### EventBridge + Step Functions
-
-S3 object-created events are routed through EventBridge into the Step Functions workflow. OCR, parsing, and storage remain visible workflow stages rather than being hidden inside one large Lambda.
-
-### Query instead of table scans
-
-Expense retrieval uses the `user_id-upload_date-index`, allowing efficient user-scoped ordering rather than scanning the entire DynamoDB table.
-
-### Parsing tuned for Indian receipts
-
-The receipt parser includes support for common Indian vendors, `₹` / `Rs` / `INR` amount formats, multiple date layouts, and merchant-specific categorization heuristics.
-
----
+A monthly-report branch was started during development but was not part of the core receipt workflow and was later abandoned. The maintained state-machine definition removes that path instead of completing an unused feature only to make the architecture larger.
 
 ## Tech stack
 
-<p>
-  <code>Python</code> ·
-  <code>AWS Lambda</code> ·
-  <code>API Gateway</code> ·
-  <code>Cognito</code> ·
-  <code>S3</code> ·
-  <code>EventBridge</code> ·
-  <code>Step Functions</code> ·
-  <code>Textract</code> ·
-  <code>DynamoDB</code> ·
-  <code>CloudFront</code>
-</p>
+`Python` · `AWS Lambda` · `Amazon API Gateway` · `Amazon Cognito` · `Amazon S3` · `Amazon EventBridge` · `AWS Step Functions` · `Amazon Textract` · `Amazon DynamoDB` · `Amazon CloudFront` · `AWS IAM`
