@@ -6,11 +6,11 @@ A user signs in with Cognito, uploads a receipt directly to S3 through a presign
 
 ## Why I built this
 
-I wanted a project that forced me to use AWS services as one connected system rather than learning Lambda, S3, Cognito, or DynamoDB separately. Receipt processing gave that system a concrete workload: authenticate a user, move an image securely, react to an event, run several backend stages, persist user-scoped data, and expose the result through an authenticated application.
+I wanted one project where I had to make multiple AWS services work together as a single application rather than learning them independently. The receipt use case forced me to deal with authentication, browser-to-cloud uploads, event routing, IAM permissions, orchestration, OCR, persistence, CRUD APIs, and private frontend hosting in one flow.
 
-The project was built incrementally through the AWS Console. Most of the learning came from making those boundaries work in practice—routing, CORS, IAM, token expiry, identity propagation, CloudFront/S3 access, and failure handling—not from drawing the final architecture first.
+The project was built incrementally through the AWS Console. As it grew, the difficult part stopped being “how do I call an AWS service?” and became “how do I make the boundaries between these services reliable?” Most of the engineering time went into those integration problems and into handling imperfect OCR output once the cloud workflow was working.
 
-The main AWS areas I wanted to become comfortable with were:
+## What I wanted to learn
 
 - authenticated browser flows with **Cognito Authorization Code + PKCE**;
 - **API Gateway** routing and Cognito authorization;
@@ -23,38 +23,57 @@ The main AWS areas I wanted to become comfortable with were:
 
 Receipt parsing became the main application-specific problem inside that cloud workflow: Textract can detect text, but the application still has to decide which detected value is actually the final amount, which line is the merchant, and what should happen when OCR is wrong.
 
-## Live workflow
+## Architecture
+
+The application is easier to understand as two connected paths: the **receipt-processing path** and the **authenticated dashboard/API path**.
+
+### 1. Receipt upload and processing
 
 ```mermaid
-flowchart LR
+flowchart TD
     U[Browser] -->|Sign in with PKCE| COG[Amazon Cognito]
-    U -->|Authenticated API calls| API[API Gateway]
-
+    U -->|POST /upload-url| API[API Gateway]
     API --> PRE[GeneratePresignedUrl Lambda]
     PRE -->|Presigned PUT URL| U
-    U -->|Receipt image| S3[(S3 receipt bucket)]
-
+    U -->|Upload receipt image| S3[(S3 receipt bucket)]
     S3 -->|Object Created| EB[Amazon EventBridge]
-    EB --> SF[ReceiptProcessorWorkflow]
-
+    EB --> SF[AWS Step Functions]
     SF --> TEX[TextractAnalyzer Lambda]
-    TEX --> OCR[Amazon Textract\nDetectDocumentText]
+    TEX --> OCR[Amazon Textract<br/>DetectDocumentText]
     OCR --> TEX
-    TEX --> PARSE[ReviewAndCategorize Lambda]
-    PARSE --> SAVE[SaveToDatabase Lambda]
+    SF --> PARSE[ReviewAndCategorize Lambda]
+    SF --> SAVE[SaveToDatabase Lambda]
     SAVE --> DB[(DynamoDB expenses)]
+```
 
+The actual Step Functions sequence is:
+
+```text
+TextractAnalyzer
+      ↓
+ReviewAndCategorize
+      ↓
+SaveToDatabase
+      ↓
+Success
+```
+
+### 2. Dashboard, review and CRUD
+
+```mermaid
+flowchart TD
+    U[Authenticated browser] --> API[API Gateway + Cognito authorizer]
     API --> GET[GetExpenses]
     API --> UPDATE[UpdateExpenses]
     API --> DELETE[DeleteExpense]
     API --> IMAGE[getReceiptURL]
 
-    GET --> DB
+    GET --> DB[(DynamoDB)]
     UPDATE --> DB
     DELETE --> DB
-    DELETE --> S3
+    DELETE --> S3[(S3 receipt bucket)]
     IMAGE --> DB
-    IMAGE --> S3
+    IMAGE -->|Presigned GET URL| S3
 ```
 
 ### Processing path
@@ -78,13 +97,13 @@ The project uses `textract.detect_document_text()`. Textract returns generic OCR
 The custom parser in [`lambdas/review-categorize/lambda_function.py`](lambdas/review-categorize/lambda_function.py) handles:
 
 - **vendor detection** — known merchant matching, then header heuristics while skipping obvious metadata;
-- **total selection** — semantically ranked labels such as `AMOUNT PAID`, `AMOUNT PAYABLE`, `GRAND TOTAL`, `NET TOTAL`, and `TOTAL`, followed by currency/decimal fallbacks;
+- **total selection** — semantically ranked labels such as `GRAND TOTAL`, `AMOUNT PAID`, `NET TOTAL`, and `TOTAL`, followed by currency/decimal fallbacks;
 - **date extraction** — several common numeric and month-name formats;
 - **categorization** — vendor-based rules for common spending categories.
 
 ### The interesting part: resolving ambiguous totals
 
-A receipt can contain several perfectly valid monetary values, while only one is the amount the user actually paid:
+A receipt often contains several numbers that all look plausible in isolation:
 
 ```text
 ITEM A          999.00
@@ -94,13 +113,18 @@ SGST             24.60
 TOTAL           869.20
 ```
 
-A naive "largest number" rule would choose the ₹999.00 item price. A loose `TOTAL` regex can also accidentally match the word `SUBTOTAL` and return ₹820.00. Both happened as the parser evolved.
+Simply choosing the largest amount would return the item price. Choosing the first line containing `TOTAL` can also fail because the word `TOTAL` appears inside `SUBTOTAL`.
 
-The maintained parser first looks for explicit payment/final-total labels and ranks them by meaning. Strong labels such as `AMOUNT PAID`, `AMOUNT PAYABLE`, `GRAND TOTAL`, and `NET TOTAL` outrank plain `TOTAL`; `TOTAL` is matched as its own label so it cannot match inside `SUBTOTAL`. Only when no labeled candidate exists does the parser fall back to currency-prefixed values and then standalone decimal amounts.
+The maintained parser therefore ranks **semantic evidence before numeric size**:
 
-That logic is intentionally heuristic rather than pretending every receipt follows one schema. The regression tests preserve the cases that caused the ranking to change.
+1. stronger final-payment labels such as `AMOUNT PAID`, `GRAND TOTAL`, `NET TOTAL`, and `BALANCE DUE`;
+2. plain `TOTAL` only when it is a standalone label rather than part of `SUBTOTAL`;
+3. currency-labelled amounts when no useful total label survives;
+4. a plausible standalone decimal only as the final fallback.
 
-Other failures encountered during testing included incomplete OCR, inconsistent `₹` / `Rs` / `INR` formatting, and semantic OCR errors such as an item name being recognized as a different phrase. The parser can improve selection when the correct text exists in the OCR output; it cannot reliably reconstruct information that Textract itself misread.
+That logic came directly from failures seen while testing real receipt OCR: item prices being selected as totals, pre-tax values winning over the final amount, multiple total-like lines, and inconsistent `₹` / `Rs` / `INR` formatting.
+
+Other failures included incomplete OCR and semantic OCR errors such as an item name being recognized as a different phrase. The parser can improve selection when the correct text exists in the OCR output; it cannot reliably reconstruct information that Textract itself misread.
 
 Because of that limitation, the application preserves the original receipt image and allows users to correct extracted expense fields from the dashboard.
 
@@ -209,11 +233,21 @@ Expense listing uses the `user_id-upload_date-index` GSI rather than scanning th
 
 OCR and heuristic parsing are best-effort. The application keeps the original receipt available through a short-lived S3 URL and lets the user correct vendor, amount, category, and date through the authenticated update endpoint.
 
+## Frontend
+
+The actual browser application is included under [`frontend/`](frontend/). It contains the Cognito PKCE flow, token handling, authenticated API wrapper, direct presigned S3 upload, expense dashboard, receipt preview, editing, and deletion used by the deployed application.
+
+The frontend is intentionally plain HTML/CSS/JavaScript with no framework or build step. The public Cognito client ID, CloudFront URL, and API Gateway endpoint are visible in the browser by design; no AWS credentials or client secret are stored in the frontend.
+
 ## Repository structure
 
 ```text
 serverless-receipt-processor/
 ├── README.md
+├── frontend/
+│   ├── index.html
+│   ├── app.js
+│   └── styles.css
 ├── api-gateway/          # historical console export + maintained route notes
 ├── cognito/              # sanitized Cognito configuration snapshot
 ├── docs/
@@ -238,8 +272,6 @@ serverless-receipt-processor/
     └── test_parser.py
 ```
 
-The deployed static frontend is hosted through CloudFront/S3. Its source is kept separate from the backend/configuration snapshot so the repository can stay focused on the AWS workflow and parsing logic.
-
 ## Known limitations
 
 - Receipt parsing is heuristic and intentionally limited to a small set of useful expense fields.
@@ -256,4 +288,4 @@ A monthly-report branch was started during development but was not part of the c
 
 ## Tech stack
 
-`Python` · `AWS Lambda` · `Amazon API Gateway` · `Amazon Cognito` · `Amazon S3` · `Amazon EventBridge` · `AWS Step Functions` · `Amazon Textract` · `Amazon DynamoDB` · `Amazon CloudFront` · `AWS IAM`
+`Python` · `JavaScript` · `AWS Lambda` · `Amazon API Gateway` · `Amazon Cognito` · `Amazon S3` · `Amazon EventBridge` · `AWS Step Functions` · `Amazon Textract` · `Amazon DynamoDB` · `Amazon CloudFront` · `AWS IAM`
