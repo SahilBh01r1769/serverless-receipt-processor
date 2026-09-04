@@ -27,6 +27,7 @@ The deployed application also exposes authenticated CRUD APIs for reviewing and 
 |---|---|
 | Authentication | Amazon Cognito with Authorization Code + PKCE |
 | Direct receipt upload | Presigned Amazon S3 PUT URL |
+| Upload event routing | Amazon S3 Object Created events through Amazon EventBridge |
 | OCR | Amazon Textract |
 | Workflow orchestration | AWS Step Functions |
 | Receipt parsing | Python Lambda logic for vendor, total, date, and category |
@@ -48,7 +49,8 @@ flowchart LR
     PRE -->|Presigned PUT URL| U
 
     U -->|Upload receipt| S3[(Amazon S3)]
-    S3 --> SF[AWS Step Functions]
+    S3 -->|Object Created| EB[Amazon EventBridge]
+    EB --> SF[AWS Step Functions]
 
     SF --> TEX[Lambda: textract-extract]
     TEX --> AT[Amazon Textract]
@@ -80,6 +82,10 @@ POST /upload-url
 Presigned S3 upload
       ↓
 Receipt image stored under uploads/{user_id}/...
+      ↓
+S3 Object Created event
+      ↓
+EventBridge rule
       ↓
 Step Functions workflow
       ↓
@@ -238,7 +244,6 @@ See [`storage/dynamo.json`](storage/dynamo.json) for the exported table definiti
 ```text
 serverless-receipt-processor/
 ├── README.md
-├── SETUP.md
 ├── api-gateway/
 │   ├── receipt_processor_API-prod-swagger.json
 │   └── restapi-paths
@@ -274,7 +279,8 @@ This repository captures the backend code and exported AWS configuration used by
 | **Amazon Cognito** | Authentication and token issuance |
 | **Amazon API Gateway** | Authenticated REST API |
 | **AWS Lambda** | Stateless business logic |
-| **Amazon S3** | Original receipt image storage |
+| **Amazon S3** | Original receipt image storage and upload events |
+| **Amazon EventBridge** | Routes S3 Object Created events into the processing workflow |
 | **AWS Step Functions** | OCR pipeline orchestration |
 | **Amazon Textract** | Receipt OCR |
 | **Amazon DynamoDB** | Structured expense storage |
@@ -283,20 +289,11 @@ This repository captures the backend code and exported AWS configuration used by
 
 ---
 
-## Setup & deployment notes
+## Development and deployment
 
-The project was built incrementally through the AWS Console, and the repository captures the working configuration rather than pretending there is a one-command deployment process.
+The project was built incrementally through the AWS Console. The repository captures the Lambda code and exported configuration from that working deployment rather than presenting a reconstructed one-command deployment as if it were how the project was originally built.
 
-[`SETUP.md`](SETUP.md) documents:
-
-- exporting AWS configuration
-- rebuilding resources in dependency order
-- redeploying individual Lambda functions
-- Cognito PKCE configuration
-- API Gateway configuration
-- troubleshooting notes discovered during development
-
-This makes the repository useful both as a portfolio project and as a technical record of the deployed system.
+The live processing path uses an S3 `Object Created` event, an EventBridge rule, and the `ReceiptProcessorWorkflow` Step Functions state machine. Infrastructure-as-code is intentionally not the focus of this repository; the emphasis is on the AWS service integration and the application logic that was actually built and debugged.
 
 ---
 
@@ -310,9 +307,9 @@ The frontend uses Cognito's Authorization Code + PKCE flow because a browser SPA
 
 Images do not pass through API Gateway or Lambda. The client receives a short-lived presigned URL and uploads directly to S3, reducing backend payload handling.
 
-### Step Functions instead of Lambda chaining
+### EventBridge + Step Functions
 
-OCR, parsing, and storage are modeled as visible workflow stages. This keeps responsibilities separated and makes execution state easier to inspect and debug.
+S3 object-created events are routed through EventBridge into the Step Functions workflow. OCR, parsing, and storage remain visible workflow stages rather than being hidden inside one large Lambda.
 
 ### Query instead of table scans
 
@@ -332,6 +329,7 @@ The receipt parser includes support for common Indian vendors, `₹` / `Rs` / `I
   <code>API Gateway</code> ·
   <code>Cognito</code> ·
   <code>S3</code> ·
+  <code>EventBridge</code> ·
   <code>Step Functions</code> ·
   <code>Textract</code> ·
   <code>DynamoDB</code> ·
