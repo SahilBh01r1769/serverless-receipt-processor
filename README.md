@@ -301,39 +301,6 @@ Each expense stores the parsed fields, source S3 key, upload timestamp, processi
 
 ---
 
-## Limitations
-
-- OCR quality depends on receipt image quality and Textract output.
-- Receipt interpretation is heuristic rather than a trained extraction model.
-- Vendor-based categorization is intentionally simple.
-- The current benchmark set is small until the metrics test is completed.
-- The application has not been load-tested for high-volume production traffic.
-
----
-
-## Repository structure
-
-```text
-.
-├── frontend/
-│   ├── index.html
-│   ├── app.js
-│   └── styles.css
-├── lambdas/
-├── statemachine/
-├── eventbridge/
-├── api-gateway/
-├── cognito/
-├── storage/
-├── tests/
-├── docs/
-│   └── media/
-├── template.yaml
-└── README.md
-```
-
----
-
 ## Tech stack
 
 `Python 3.13` · `AWS SAM` · `Lambda` · `API Gateway` · `Cognito` · `S3` · `EventBridge` · `Step Functions` · `Textract` · `DynamoDB` · `CloudFront`
